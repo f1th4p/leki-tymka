@@ -500,8 +500,26 @@ def end_schedule(schedule_id: int) -> None:
         c.execute("UPDATE schedules SET active_to = ? WHERE id = ? AND active_to IS NULL", (today, schedule_id))
 
 
+def _require_password() -> None:
+    pw = _secret("APP_PASSWORD")
+    if not pw:
+        return
+    if st.session_state.get("authed"):
+        return
+    st.title("🔒 Leki Tymka")
+    entered = st.text_input("Hasło", type="password")
+    if entered:
+        if entered == pw:
+            st.session_state["authed"] = True
+            st.rerun()
+        else:
+            st.error("Błędne hasło")
+    st.stop()
+
+
 def main():
     st.set_page_config(page_title="Leki Tymka", page_icon="💊", layout="centered")
+    _require_password()
     init_db()
     now = datetime.now().replace(second=0, microsecond=0)
 
