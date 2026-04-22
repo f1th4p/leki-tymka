@@ -1,0 +1,15 @@
+__pycache__/
+*.pyc
+.venv/
+venv/
+.env
+.streamlit/secrets.toml
+!.streamlit/secrets.toml.example
+leki.db
+leki.db-journal
+leki.db-wal
+leki.db-shm
+.DS_Store
+.claude/
+*.pdf
+
