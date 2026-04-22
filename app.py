@@ -177,9 +177,26 @@ def conn():
         c.close()
 
 
+MIGRATIONS = [
+    "ALTER TABLE medications ADD COLUMN paused INTEGER NOT NULL DEFAULT 0",
+    "ALTER TABLE medications ADD COLUMN paused_reason TEXT",
+    "ALTER TABLE packages ADD COLUMN brand TEXT",
+    "ALTER TABLE packages ADD COLUMN approximate INTEGER NOT NULL DEFAULT 0",
+]
+
+
+def _migrate(c) -> None:
+    for stmt in MIGRATIONS:
+        try:
+            c.execute(stmt)
+        except Exception:
+            pass
+
+
 def init_db() -> None:
     with conn() as c:
         c.executescript(SCHEMA)
+        _migrate(c)
         if c.execute("SELECT COUNT(*) FROM medications").fetchone()[0] == 0:
             c.executemany(
                 "INSERT INTO medications(name, form, unit, doses_per_package) VALUES(?,?,?,?)",
@@ -224,6 +241,7 @@ def _generate_expected_slots(c: sqlite3.Connection, horizon_start: date, now: da
         """
         SELECT s.id, s.med_id, m.name, m.unit, s.time_of_day, s.dose_amount, s.active_from, s.active_to
         FROM schedules s JOIN medications m ON m.id = s.med_id
+        WHERE m.paused = 0
         """
     ).fetchall()
     slots: list[Slot] = []
@@ -234,7 +252,8 @@ def _generate_expected_slots(c: sqlite3.Connection, horizon_start: date, now: da
         hh, mm = r["time_of_day"].split(":")
         t = time(int(hh), int(mm))
         start = max(af, horizon_start)
-        end = min(at, today) if at else today
+        # active_to jest exclusive — ostatni aktywny dzień to active_to - 1
+        end = min(at - timedelta(days=1), today) if at else today
         d = start
         while d <= end:
             slot_dt = datetime.combine(d, t)
@@ -314,7 +333,8 @@ def today_slots(now: datetime) -> list[dict]:
             """
             SELECT s.med_id, m.name, m.unit, s.time_of_day, s.dose_amount, s.active_from, s.active_to
             FROM schedules s JOIN medications m ON m.id = s.med_id
-            WHERE s.active_from <= ? AND (s.active_to IS NULL OR s.active_to >= ?)
+            WHERE m.paused = 0
+              AND s.active_from <= ? AND (s.active_to IS NULL OR s.active_to > ?)
             ORDER BY s.time_of_day, m.name
             """,
             (today.isoformat(), today.isoformat()),
@@ -348,6 +368,7 @@ def stock_overview() -> pd.DataFrame:
         rows = c.execute(
             """
             SELECT m.id AS med_id, m.name, m.unit, m.doses_per_package,
+                   m.paused, m.paused_reason,
                    COALESCE(SUM(CASE WHEN p.active = 1 THEN p.doses_left ELSE 0 END), 0) AS doses_left,
                    SUM(CASE WHEN p.active = 1 THEN 1 ELSE 0 END) AS active_packages
             FROM medications m LEFT JOIN packages p ON p.med_id = m.id
@@ -356,6 +377,50 @@ def stock_overview() -> pd.DataFrame:
         ).fetchall()
         df = pd.DataFrame([dict(r) for r in rows])
     return df
+
+
+def paused_meds() -> list[dict]:
+    with conn() as c:
+        rows = c.execute(
+            "SELECT id, name, paused_reason FROM medications WHERE paused = 1 ORDER BY name"
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def pause_med(med_id: int, reason: str) -> None:
+    today = date.today().isoformat()
+    with conn() as c:
+        c.execute(
+            "UPDATE schedules SET active_to = ? WHERE med_id = ? AND active_to IS NULL",
+            (today, med_id),
+        )
+        c.execute(
+            "UPDATE medications SET paused = 1, paused_reason = ? WHERE id = ?",
+            (reason, med_id),
+        )
+
+
+def resume_med(med_id: int) -> None:
+    today = date.today().isoformat()
+    with conn() as c:
+        last = c.execute(
+            """
+            SELECT time_of_day, dose_amount FROM schedules
+            WHERE med_id = ? AND id IN (
+                SELECT MAX(id) FROM schedules WHERE med_id = ? GROUP BY time_of_day
+            )
+            """,
+            (med_id, med_id),
+        ).fetchall()
+        for s in last:
+            c.execute(
+                "INSERT INTO schedules(med_id, time_of_day, dose_amount, active_from) VALUES(?,?,?,?)",
+                (med_id, s["time_of_day"], s["dose_amount"], today),
+            )
+        c.execute(
+            "UPDATE medications SET paused = 0, paused_reason = NULL WHERE id = ?",
+            (med_id,),
+        )
 
 
 def days_of_supply(med_id: int, doses_left: int) -> float | None:
@@ -368,6 +433,13 @@ def days_of_supply(med_id: int, doses_left: int) -> float | None:
     if per_day == 0:
         return None
     return round(doses_left / per_day, 1)
+
+
+def end_date_for(med_id: int, doses_left: int) -> str | None:
+    dps = days_of_supply(med_id, doses_left)
+    if dps is None:
+        return None
+    return (date.today() + timedelta(days=int(dps))).isoformat()
 
 
 def skip_slot(med_id: int, slot_key: str, slot_dt: datetime) -> None:
@@ -437,12 +509,22 @@ def record_ad_hoc(med_id: int, doses: int, when: datetime) -> None:
         )
 
 
-def add_packages(med_id: int, count: int, doses_each: int, purchased_at: date) -> None:
+def add_packages(
+    med_id: int,
+    count: int,
+    doses_each: int,
+    purchased_at: date,
+    brand: str | None = None,
+    approximate: bool = False,
+) -> None:
     with conn() as c:
         for _ in range(count):
             c.execute(
-                "INSERT INTO packages(med_id, purchased_at, opened_at, doses_initial, doses_left, active) VALUES(?,?,NULL,?,?,1)",
-                (med_id, purchased_at.isoformat(), doses_each, doses_each),
+                """
+                INSERT INTO packages(med_id, purchased_at, opened_at, doses_initial, doses_left, active, brand, approximate)
+                VALUES(?,?,NULL,?,?,1,?,?)
+                """,
+                (med_id, purchased_at.isoformat(), doses_each, doses_each, brand or None, 1 if approximate else 0),
             )
 
 
@@ -450,7 +532,7 @@ def list_packages(med_id: int) -> pd.DataFrame:
     with conn() as c:
         rows = c.execute(
             """
-            SELECT id, purchased_at, opened_at, doses_initial, doses_left, active
+            SELECT id, purchased_at, opened_at, doses_initial, doses_left, active, brand, approximate
             FROM packages WHERE med_id = ?
             ORDER BY (opened_at IS NULL), opened_at, purchased_at, id
             """,
@@ -536,6 +618,33 @@ def main():
 
     with tab_dzis:
         slots = today_slots(now)
+
+        taken = sum(1 for s in slots if s["kind"] == "scheduled")
+        total = len(slots)
+        upcoming = [s for s in slots if s["slot_dt"] > now and s["kind"] is None]
+        if upcoming:
+            nu = min(upcoming, key=lambda s: s["slot_dt"])
+            delta = nu["slot_dt"] - now
+            h, m = divmod(delta.seconds // 60, 60)
+            hm = f"{h}h {m}min" if h else f"{m} min"
+            st.info(
+                f"🕒 Następna: **{nu['name']}** o {nu['time']} (za {hm}) • "
+                f"zażyte dziś: {taken}/{total}"
+            )
+        elif total and taken >= total:
+            st.success(f"🎉 Wszystkie dzisiejsze dawki wzięte ({taken}/{total})")
+
+        pm = paused_meds()
+        if pm:
+            st.warning(
+                "⏸️ Zawieszone: "
+                + ", ".join(
+                    f"**{p['name']}**" + (f" ({p['paused_reason']})" if p.get("paused_reason") else "")
+                    for p in pm
+                )
+                + " — sloty nie są generowane, opakowania nieruszone."
+            )
+
         if not slots:
             st.info("Brak zaplanowanych dawek na dziś.")
         for s in slots:
@@ -581,21 +690,33 @@ def main():
 
     with tab_apteczka:
         df = stock_overview()
-        df["dni_zapasu"] = [days_of_supply(int(r.med_id), int(r.doses_left)) for r in df.itertuples()]
+        df["dni_zapasu"] = [
+            None if bool(r.paused) else days_of_supply(int(r.med_id), int(r.doses_left))
+            for r in df.itertuples()
+        ]
+        df["do_kiedy"] = [
+            None if bool(r.paused) else end_date_for(int(r.med_id), int(r.doses_left))
+            for r in df.itertuples()
+        ]
+        df["status"] = df["paused"].map(lambda p: "⏸️ zawieszony" if p else "")
+
         st.subheader("Stan ogólny")
-        low = df[df["dni_zapasu"].fillna(999) < 7]
+        active_only = df[df["paused"] == 0]
+        low = active_only[active_only["dni_zapasu"].fillna(999) < 7]
         if not low.empty:
             st.warning(
                 "⚠️ Mało zapasu (< 7 dni): "
-                + ", ".join(f"{r.name} ({r.dni_zapasu} d)" for r in low.itertuples())
+                + ", ".join(f"{r.name} ({r.dni_zapasu} d, do {r.do_kiedy})" for r in low.itertuples())
             )
         st.dataframe(
-            df[["name", "doses_left", "active_packages", "dni_zapasu"]].rename(
+            df[["name", "status", "doses_left", "active_packages", "dni_zapasu", "do_kiedy"]].rename(
                 columns={
                     "name": "Lek",
+                    "status": "Stan",
                     "doses_left": "Pozostałe dawki",
                     "active_packages": "Aktywne opak.",
                     "dni_zapasu": "Dni zapasu",
+                    "do_kiedy": "Skończy się",
                 }
             ),
             hide_index=True,
@@ -605,25 +726,48 @@ def main():
         st.divider()
         st.subheader("Szczegóły opakowań")
         meds_df = all_meds()
+        pm_list = paused_meds()
+        paused_info = {p["id"]: (p.get("paused_reason") or "") for p in pm_list}
         for m in meds_df.itertuples():
-            with st.expander(f"{m.name}"):
+            is_paused = int(m.id) in paused_info
+            label = f"{'⏸️ ' if is_paused else ''}{m.name}"
+            with st.expander(label):
+                if is_paused:
+                    st.info(f"Zawieszony. Powód: *{paused_info.get(int(m.id)) or '—'}*")
+                    if st.button("▶️ Wznów (odtworzy schemat od dziś)", key=f"resume_{m.id}"):
+                        resume_med(int(m.id))
+                        st.rerun()
+                else:
+                    with st.popover("⏸️ Zawieś lek"):
+                        reason = st.text_input(
+                            "Powód (np. niedostępny w aptece)",
+                            key=f"pause_reason_{m.id}",
+                        )
+                        st.caption("Zamyka aktywny schemat, sloty przestają być generowane, opakowania nieruszone.")
+                        if st.button("Potwierdź zawieszenie", key=f"pause_btn_{m.id}", type="primary"):
+                            pause_med(int(m.id), reason.strip())
+                            st.rerun()
+
                 pkgs = list_packages(int(m.id))
                 if pkgs.empty:
                     st.caption("Brak opakowań.")
                 else:
                     for p in pkgs.itertuples():
                         c1, c2, c3, c4 = st.columns([2, 2, 2, 1])
-                        c1.write(f"Zakup: {p.purchased_at}")
-                        c2.write(f"Otwarte: {p.opened_at or '—'}")
-                        new_left = c3.number_input(
-                            "Dawki",
+                        brand_label = p.brand if p.brand else m.name
+                        approx_mark = " ~" if p.approximate else ""
+                        c1.write(f"**{brand_label}**{approx_mark}")
+                        c1.caption(f"Zakup: {p.purchased_at} • Otwarte: {p.opened_at or '—'}")
+                        new_left = c2.number_input(
+                            "Dawki" + (" (szac.)" if p.approximate else ""),
                             min_value=0,
                             max_value=int(p.doses_initial),
                             value=int(p.doses_left),
                             step=1,
                             key=f"pkg_left_{p.id}",
                         )
-                        new_active = 1 if c4.checkbox("akt.", value=bool(p.active), key=f"pkg_act_{p.id}") else 0
+                        new_active = 1 if c3.checkbox("aktywne", value=bool(p.active), key=f"pkg_act_{p.id}") else 0
+                        c4.caption(f"z {int(p.doses_initial)}")
                         if (new_left != p.doses_left) or (new_active != p.active):
                             update_package(int(p.id), int(new_left), int(new_active), p.opened_at)
                             st.rerun()
@@ -640,9 +784,23 @@ def main():
                     key=f"add_d_{m.id}",
                 )
                 pdate = c3.date_input("Data zakupu", value=date.today(), key=f"add_date_{m.id}")
+                c4, c5 = st.columns([3, 2])
+                brand = c4.text_input(
+                    "Marka / zamiennik (opcjonalnie)",
+                    value="",
+                    placeholder=m.name,
+                    help="Zostaw puste jeśli to ten sam lek. Wpisz np. 'Adablix' gdy zamiennik.",
+                    key=f"add_brand_{m.id}",
+                )
+                approx = c5.checkbox(
+                    "dawka przybliżona",
+                    value=False,
+                    help="Dla sprayów/płynów gdzie pompka nie daje stałej dawki.",
+                    key=f"add_approx_{m.id}",
+                )
                 if st.button("Dodaj", key=f"add_btn_{m.id}"):
-                    add_packages(int(m.id), int(n), int(doses_each), pdate)
-                    st.success(f"Dodano {n} op. {m.name}")
+                    add_packages(int(m.id), int(n), int(doses_each), pdate, brand=brand.strip() or None, approximate=approx)
+                    st.success(f"Dodano {n} op. {brand.strip() or m.name}")
                     st.rerun()
 
     with tab_schemat:
@@ -698,8 +856,9 @@ def main():
         with conn() as c:
             rows = c.execute(
                 """
-                SELECT i.taken_at, m.name AS lek, i.doses, i.kind, i.auto
+                SELECT i.taken_at, m.name AS lek, p.brand, i.doses, i.kind, i.auto
                 FROM intakes i JOIN medications m ON m.id = i.med_id
+                LEFT JOIN packages p ON p.id = i.package_id
                 ORDER BY i.taken_at DESC LIMIT 100
                 """
             ).fetchall()
@@ -708,6 +867,11 @@ def main():
             st.info("Brak historii.")
         else:
             hdf["auto"] = hdf["auto"].map({1: "auto", 0: "ręcznie"})
+            hdf["lek"] = hdf.apply(
+                lambda r: f"{r['lek']} ({r['brand']})" if r.get("brand") and r["brand"] != r["lek"] else r["lek"],
+                axis=1,
+            )
+            hdf = hdf.drop(columns=["brand"])
             st.dataframe(
                 hdf.rename(columns={"taken_at": "Kiedy", "lek": "Lek", "doses": "Dawki", "kind": "Rodzaj", "auto": "Źródło"}),
                 hide_index=True,
