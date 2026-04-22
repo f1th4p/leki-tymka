@@ -154,7 +154,7 @@ SEED_SCHEDULE = [
 
 def _open_raw():
     if TURSO_URL:
-        import libsql_experimental as libsql
+        import libsql
         raw = libsql.connect(database=DB_PATH, sync_url=TURSO_URL, auth_token=TURSO_TOKEN)
         try:
             raw.sync()
