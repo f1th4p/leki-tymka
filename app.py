@@ -549,6 +549,19 @@ def update_package(pkg_id: int, doses_left: int, active: int, opened_at: str | N
         )
 
 
+def rename_med(med_id: int, new_name: str) -> None:
+    with conn() as c:
+        c.execute("UPDATE medications SET name = ? WHERE id = ?", (new_name, med_id))
+
+
+def update_package_initial(pkg_id: int, doses_initial: int) -> None:
+    with conn() as c:
+        c.execute(
+            "UPDATE packages SET doses_initial = ?, doses_left = MIN(doses_left, ?) WHERE id = ?",
+            (doses_initial, doses_initial, pkg_id),
+        )
+
+
 def list_schedules() -> pd.DataFrame:
     with conn() as c:
         rows = c.execute(
@@ -587,6 +600,10 @@ def _require_password() -> None:
     if not pw:
         return
     if st.session_state.get("authed"):
+        return
+    token = st.query_params.get("k")
+    if token == pw:
+        st.session_state["authed"] = True
         return
     st.title("🔒 Leki Tymka")
     entered = st.text_input("Hasło", type="password")
@@ -732,6 +749,17 @@ def main():
             is_paused = int(m.id) in paused_info
             label = f"{'⏸️ ' if is_paused else ''}{m.name}"
             with st.expander(label):
+                with st.popover("✏️ Zmień nazwę leku"):
+                    new_name = st.text_input(
+                        "Nowa nazwa",
+                        value=m.name,
+                        key=f"rename_input_{m.id}",
+                    )
+                    if st.button("Zapisz nazwę", key=f"rename_btn_{m.id}", type="primary"):
+                        nn = new_name.strip()
+                        if nn and nn != m.name:
+                            rename_med(int(m.id), nn)
+                            st.rerun()
                 if is_paused:
                     st.info(f"Zawieszony. Powód: *{paused_info.get(int(m.id)) or '—'}*")
                     if st.button("▶️ Wznów (odtworzy schemat od dziś)", key=f"resume_{m.id}"):
@@ -758,16 +786,28 @@ def main():
                         approx_mark = " ~" if p.approximate else ""
                         c1.write(f"**{brand_label}**{approx_mark}")
                         c1.caption(f"Zakup: {p.purchased_at} • Otwarte: {p.opened_at or '—'}")
+                        new_initial = c2.number_input(
+                            "Pojemność opak.",
+                            min_value=1,
+                            max_value=1000,
+                            value=int(p.doses_initial),
+                            step=1,
+                            key=f"pkg_init_{p.id}",
+                            help="Ile dawek łącznie mieści to opakowanie.",
+                        )
                         new_left = c2.number_input(
-                            "Dawki" + (" (szac.)" if p.approximate else ""),
+                            "Dawki pozostałe" + (" (szac.)" if p.approximate else ""),
                             min_value=0,
-                            max_value=int(p.doses_initial),
-                            value=int(p.doses_left),
+                            max_value=int(new_initial),
+                            value=min(int(p.doses_left), int(new_initial)),
                             step=1,
                             key=f"pkg_left_{p.id}",
                         )
                         new_active = 1 if c3.checkbox("aktywne", value=bool(p.active), key=f"pkg_act_{p.id}") else 0
-                        c4.caption(f"z {int(p.doses_initial)}")
+                        c4.caption(f"z {int(new_initial)}")
+                        if int(new_initial) != int(p.doses_initial):
+                            update_package_initial(int(p.id), int(new_initial))
+                            st.rerun()
                         if (new_left != p.doses_left) or (new_active != p.active):
                             update_package(int(p.id), int(new_left), int(new_active), p.opened_at)
                             st.rerun()
