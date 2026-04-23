@@ -1177,7 +1177,7 @@ def main():
                     st.caption("Brak opakowań.")
                 else:
                     for p in pkgs.itertuples():
-                        brand_label = p.brand if p.brand else m.name
+                        brand_label = p.brand if (pd.notna(p.brand) and p.brand) else m.name
                         approx_mark = " ~" if p.approximate else ""
                         with st.form(f"pkg_form_{p.id}"):
                             opened_disp = p.opened_at if pd.notna(p.opened_at) else None
