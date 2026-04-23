@@ -1469,10 +1469,17 @@ def main():
             "📅 Następna wizyta u pediatry",
             value=visit_val, key="visit_date",
         )
-        if st.button("Zapisz datę wizyty", key="save_visit"):
-            set_setting("next_doctor_visit", visit_date_new.isoformat())
-            st.success("Zapisano.")
-            st.rerun()
+        col_save, col_del = st.columns(2)
+        with col_save:
+            if st.button("Zapisz datę wizyty", key="save_visit"):
+                set_setting("next_doctor_visit", visit_date_new.isoformat())
+                st.success("Zapisano.")
+                st.rerun()
+        with col_del:
+            if st.button("🗑️ Usuń wizytę", key="del_visit", disabled=not cur_visit):
+                set_setting("next_doctor_visit", None)
+                st.success("Usunięto.")
+                st.rerun()
 
         cur_caregivers = get_setting("caregivers") or "Ja"
         cg_new = st.text_input(
