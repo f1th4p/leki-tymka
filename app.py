@@ -611,6 +611,13 @@ def update_package(pkg_id: int, doses_left: int, active: int, opened_at: str | N
 def rename_med(med_id: int, new_name: str) -> None:
     with conn() as c:
         c.execute("UPDATE medications SET name = ? WHERE id = ?", (new_name, med_id))
+        c.execute("UPDATE packages SET brand = NULL WHERE med_id = ?", (med_id,))
+
+
+def delete_package(pkg_id: int) -> None:
+    with conn() as c:
+        c.execute("UPDATE intakes SET package_id = NULL WHERE package_id = ?", (pkg_id,))
+        c.execute("DELETE FROM packages WHERE id = ?", (pkg_id,))
 
 
 def update_package_initial(pkg_id: int, doses_initial: int) -> None:
@@ -1201,7 +1208,15 @@ def main():
                                 key=f"pkg_left_{p.id}",
                             )
                             new_active = 1 if c3.checkbox(
-                                "aktywne", value=bool(p.active), key=f"pkg_act_{p.id}"
+                                "aktywne",
+                                value=bool(p.active),
+                                key=f"pkg_act_{p.id}",
+                                help=(
+                                    "Czy to opakowanie jest w użyciu — dawki odejmują się "
+                                    "z najstarszego aktywnego. Apka sama wyłącza gdy zejdzie "
+                                    "do 0. Odznacz ręcznie tylko gdy chcesz 'odłożyć' "
+                                    "opakowanie (rezerwa, wygasło)."
+                                ),
                             ) else 0
                             if st.form_submit_button("💾 Zapisz zmiany"):
                                 changed = False
@@ -1215,6 +1230,20 @@ def main():
                                     changed = True
                                 if changed:
                                     st.rerun()
+                        confirm_key = f"pkg_del_confirm_{p.id}"
+                        if st.session_state.get(confirm_key):
+                            cc1, cc2 = st.columns(2)
+                            if cc1.button("✅ Tak, usuń", key=f"pkg_del_yes_{p.id}", type="primary"):
+                                delete_package(int(p.id))
+                                st.session_state.pop(confirm_key, None)
+                                st.rerun()
+                            if cc2.button("Anuluj", key=f"pkg_del_no_{p.id}"):
+                                st.session_state.pop(confirm_key, None)
+                                st.rerun()
+                        else:
+                            if st.button("🗑 Usuń opakowanie", key=f"pkg_del_{p.id}"):
+                                st.session_state[confirm_key] = True
+                                st.rerun()
 
                 st.markdown("**Dodaj zakupione opakowania**")
                 c1, c2, c3 = st.columns([1, 2, 2])
