@@ -12,6 +12,19 @@ python3 -m venv .venv
 
 Apka otworzy się na `http://localhost:8501`. Bez żadnych dodatkowych sekretów używa lokalnego pliku `leki.db` (SQLite).
 
+## Push zmian (= auto-deploy na Streamlit Cloud)
+
+Każdy push do `main` powoduje automatyczny rebuild apki w Streamlit Cloud (~30 s). Standardowy workflow:
+
+```bash
+git pull --rebase          # najpierw ściągnij zmiany z GitHuba (np. Dev Container / edycje z przeglądarki)
+git add -A                 # albo konkretne pliki zamiast -A
+git commit -m "Opis zmiany"
+git push
+```
+
+Jeśli push odrzuca z `rejected (non-fast-forward)` — to znaczy że na GitHubie jest commit którego nie masz lokalnie. Zrób `git pull --rebase` i spróbuj ponownie. **Nie** używaj `git push --force` — nadpisze historię w chmurze.
+
 ## Struktura
 
 | Plik | Co |

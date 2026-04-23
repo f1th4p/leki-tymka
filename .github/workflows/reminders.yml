@@ -1,0 +1,35 @@
+name: reminders
+
+on:
+  schedule:
+    # GitHub Actions cron is UTC. Uruchomienia co 10 minut w okresie 05:00–22:00
+    # Europe/Warsaw (czyli 04:00–21:00 UTC w sezonie letnim, 04:00–20:00 UTC w zimie).
+    # Upraszczamy do pełnej doby co 10 min — tanio i pewnie.
+    - cron: "*/10 * * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: reminders
+  cancel-in-progress: false
+
+jobs:
+  notify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install libsql
+        run: pip install --quiet libsql
+
+      - name: Send reminders
+        env:
+          TURSO_DATABASE_URL: ${{ secrets.TURSO_DATABASE_URL }}
+          TURSO_AUTH_TOKEN: ${{ secrets.TURSO_AUTH_TOKEN }}
+          NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}
+          APP_TZ: Europe/Warsaw
+        run: python notify.py
