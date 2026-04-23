@@ -63,12 +63,17 @@ class _Conn:
 
     def execute(self, sql, params=()):
         if params:
+            params = tuple(None if isinstance(p, float) and p != p else p for p in params)
             cur = self._raw.execute(sql, params)
         else:
             cur = self._raw.execute(sql)
         return _Cursor(cur)
 
     def executemany(self, sql, seq):
+        seq = [
+            tuple(None if isinstance(p, float) and p != p else p for p in row)
+            for row in seq
+        ]
         self._raw.executemany(sql, seq)
 
     def executescript(self, script):
@@ -76,17 +81,11 @@ class _Conn:
 
     def commit(self):
         self._raw.commit()
-        if self._is_remote and hasattr(self._raw, "sync"):
-            try:
-                self._raw.sync()
-            except Exception:
-                pass
+        # Remote sync leci w tle co `sync_interval` sekund — patrz _open_raw.
 
     def close(self):
-        try:
-            self._raw.close()
-        except Exception:
-            pass
+        # Połączenie jest cache'owane przez @st.cache_resource, nie zamykamy.
+        pass
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS medications (
@@ -178,16 +177,22 @@ SEED_SCHEDULE = [
 ]
 
 
+@st.cache_resource
 def _open_raw():
     if TURSO_URL:
         import libsql
-        raw = libsql.connect(database=DB_PATH, sync_url=TURSO_URL, auth_token=TURSO_TOKEN)
+        raw = libsql.connect(
+            database=DB_PATH,
+            sync_url=TURSO_URL,
+            auth_token=TURSO_TOKEN,
+            sync_interval=30,
+        )
         try:
             raw.sync()
         except Exception:
             pass
         return raw, True
-    raw = sqlite3.connect(DB_PATH)
+    raw = sqlite3.connect(DB_PATH, check_same_thread=False)
     raw.execute("PRAGMA foreign_keys = ON")
     return raw, False
 
@@ -196,11 +201,8 @@ def _open_raw():
 def conn():
     raw, is_remote = _open_raw()
     c = _Conn(raw, is_remote)
-    try:
-        yield c
-        c.commit()
-    finally:
-        c.close()
+    yield c
+    c.commit()
 
 
 MIGRATIONS = [
@@ -1178,9 +1180,10 @@ def main():
                         brand_label = p.brand if p.brand else m.name
                         approx_mark = " ~" if p.approximate else ""
                         with st.form(f"pkg_form_{p.id}"):
+                            opened_disp = p.opened_at if pd.notna(p.opened_at) else None
                             st.write(
                                 f"**{brand_label}**{approx_mark}  •  "
-                                f"Zakup: {p.purchased_at} • Otwarte: {p.opened_at or '—'}"
+                                f"Zakup: {p.purchased_at} • Otwarte: {opened_disp or '—'}"
                             )
                             c1, c2, c3 = st.columns([2, 2, 1])
                             new_initial = c1.number_input(
