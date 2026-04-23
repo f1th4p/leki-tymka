@@ -6,11 +6,17 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta
 from itertools import groupby
+from zoneinfo import ZoneInfo
 
 import pandas as pd
 import streamlit as st
 
 DB_PATH = os.environ.get("LEKI_DB", "leki.db")
+TZ = ZoneInfo(os.environ.get("APP_TZ", "Europe/Warsaw"))
+
+
+def _now_local() -> datetime:
+    return datetime.now(TZ).replace(tzinfo=None)
 
 
 def _secret(name: str) -> str | None:
@@ -706,7 +712,7 @@ def log_health(log_date: str, period: str, pef: int | None, symptoms: int | None
                 note = excluded.note,
                 created_at = excluded.created_at
             """,
-            (log_date, period, pef, symptoms, note, datetime.now().isoformat(timespec="minutes")),
+            (log_date, period, pef, symptoms, note, _now_local().isoformat(timespec="minutes")),
         )
 
 
@@ -847,7 +853,7 @@ def main():
     st.set_page_config(page_title="Leki Tymka", page_icon="💊", layout="centered")
     _require_password()
     init_db()
-    now = datetime.now().replace(second=0, microsecond=0)
+    now = _now_local().replace(second=0, microsecond=0)
 
     created = close_pending(now)
     if created:
